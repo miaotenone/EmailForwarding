@@ -1,9 +1,13 @@
+import os
 import re
+import json
 import imaplib
 import email
 from email.header import decode_header
 from email.utils import parseaddr
 from dataclasses import dataclass, field
+
+PROCESSED_UIDS_FILE = os.path.join(os.path.dirname(__file__), "processed_uids.json")
 
 
 @dataclass
@@ -22,6 +26,27 @@ class EmailMessage:
     body: str
     date: str
     attachments: list = field(default_factory=list)
+
+
+def _load_processed_uids():
+    if os.path.exists(PROCESSED_UIDS_FILE):
+        with open(PROCESSED_UIDS_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {}
+
+
+def _save_processed_uids(data):
+    with open(PROCESSED_UIDS_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def _mark_uid_processed(account_email, uid):
+    data = _load_processed_uids()
+    if account_email not in data:
+        data[account_email] = []
+    if uid not in data[account_email]:
+        data[account_email].append(uid)
+    _save_processed_uids(data)
 
 
 def _decode_str(s):
@@ -121,9 +146,16 @@ def fetch_unseen(host, port, user, password):
     _, data = mail.search(None, "UNSEEN")
     uid_list = data[0].split()
 
+    processed = _load_processed_uids()
+    account_processed = set(processed.get(user, []))
+
     messages = []
     for uid_bytes in uid_list:
         uid_str = uid_bytes.decode()
+
+        if uid_str in account_processed:
+            continue
+
         _, msg_data = mail.fetch(uid_bytes, "(RFC822)")
         raw_email = msg_data[0][1]
         msg = email.message_from_bytes(raw_email)
@@ -135,7 +167,7 @@ def fetch_unseen(host, port, user, password):
         date = msg.get("Date", "")
         attachments = _get_attachments(msg)
 
-        mail.store(uid_bytes, "+FLAGS", "\\Seen")
+        _mark_uid_processed(user, uid_str)
 
         messages.append(EmailMessage(
             uid=uid_str,

@@ -1,5 +1,6 @@
 .env
 accounts.json
+processed_uids.json
 __pycache__/
 *.pyc
 *.pyo
