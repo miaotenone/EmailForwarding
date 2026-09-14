@@ -72,30 +72,62 @@ check_system() {
     fi
 }
 
+# ─── 安装系统依赖 ───
+install_system_deps() {
+    step "2/7 安装系统依赖"
+
+    PY_VER=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
+
+    # 检测是否为root
+    SUDO=""
+    if [ "$(id -u)" -ne 0 ]; then
+        SUDO="sudo"
+    fi
+
+    info "检测到 Python $PY_VER，正在安装依赖..."
+
+    # 尝试多种包名（兼容不同发行版）
+    $SUDO apt-get update -qq 2>/dev/null || true
+
+    INSTALLED=0
+    for pkg in "python${PY_VER}-venv" "python3-venv" "python${PY_VER}-full"; do
+        if apt-cache show "$pkg" &>/dev/null 2>&1; then
+            $SUDO apt-get install -y -qq "$pkg" 2>/dev/null && INSTALLED=1 && break
+        fi
+    done
+
+    # 安装pip（备用）
+    $SUDO apt-get install -y -qq python3-pip 2>/dev/null || true
+
+    # 验证venv可用
+    if ! python3 -m venv --help &>/dev/null 2>&1; then
+        error "python3-venv 安装失败，请手动执行:"
+        error "  sudo apt install python${PY_VER}-venv"
+        exit 1
+    fi
+
+    success "系统依赖安装完成"
+}
+
 # ─── 创建虚拟环境 ───
 setup_venv() {
-    step "2/7 配置Python环境"
+    step "3/7 配置Python环境"
 
     if [ -d "$VENV_DIR" ]; then
-        # 检查已有venv是否可用
         if [ -f "$VENV_DIR/bin/python3" ]; then
             warn "虚拟环境已存在"
             read -r -p "  是否重建? [y/N] " REBUILD
-            if [[ "$REBUILD" =~ ^[Yy]$ ]]; then
-                rm -rf "$VENV_DIR"
-                python3 -m venv "$VENV_DIR"
-                success "虚拟环境已重建"
+            if [[ ! "$REBUILD" =~ ^[Yy]$ ]]; then
+                "$VENV_DIR/bin/pip" install -q -r "$SCRIPT_DIR/requirements.txt"
+                success "依赖安装完成"
+                return
             fi
-        else
-            warn "已有虚拟环境损坏，自动重建..."
-            rm -rf "$VENV_DIR"
-            python3 -m venv "$VENV_DIR"
-            success "虚拟环境已重建"
         fi
-    else
-        python3 -m venv "$VENV_DIR"
-        success "虚拟环境已创建"
+        rm -rf "$VENV_DIR"
     fi
+
+    python3 -m venv "$VENV_DIR"
+    success "虚拟环境已创建"
 
     "$VENV_DIR/bin/pip" install -q -r "$SCRIPT_DIR/requirements.txt"
     success "依赖安装完成"
@@ -150,7 +182,7 @@ add_account() {
 
 # ─── 多账号配置 ───
 configure_accounts() {
-    step "3/7 邮箱账号配置"
+    step "4/8 邮箱账号配置"
     echo ""
     echo -e "  ${CYAN}支持同时监控多个邮箱账号，每个账号都会独立读取并推送。${NC}"
     echo ""
@@ -181,7 +213,7 @@ configure_accounts() {
 
 # ─── 飞书配置 ───
 configure_feishu() {
-    step "4/7 飞书机器人配置"
+    step "5/8 飞书机器人配置"
 
     echo ""
     echo -e "  ${CYAN}获取方式: 飞书群 → 群设置 → 群机器人 → 添加机器人 → 自定义机器人${NC}"
@@ -204,7 +236,7 @@ configure_feishu() {
 
 # ─── 运行参数 ───
 configure_runtime() {
-    step "5/7 运行参数"
+    step "6/8 运行参数"
 
     read -r -p "  轮询间隔(秒) [60]: " POLL_SEC
     POLL_SEC="${POLL_SEC:-60}"
@@ -214,7 +246,7 @@ configure_runtime() {
 
 # ─── 写入文件 ───
 write_files() {
-    step "6/7 写入配置文件"
+    step "7/8 写入配置文件"
 
     # .env
     if [ -f "$ENV_FILE" ]; then
@@ -255,7 +287,7 @@ install_service() {
         return
     fi
 
-    step "7/7 注册系统服务"
+    step "8/8 注册系统服务"
 
     sudo tee /etc/systemd/system/${SERVICE_NAME}.service > /dev/null <<SVCEOF
 [Unit]
@@ -348,6 +380,7 @@ print_summary() {
 main() {
     divider
     check_system
+    install_system_deps
     setup_venv
     configure_accounts
     configure_feishu

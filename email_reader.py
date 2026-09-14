@@ -73,6 +73,9 @@ def fetch_unseen(host, port, user, password):
         body = _get_body(msg)
         date = msg.get("Date", "")
 
+        # 标记为已读，避免重复推送
+        mail.store(uid_bytes, "+FLAGS", "\\Seen")
+
         messages.append(EmailMessage(
             uid=uid_str,
             sender=sender_email,
