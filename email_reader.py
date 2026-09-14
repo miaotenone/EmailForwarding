@@ -1,8 +1,16 @@
+import re
 import imaplib
 import email
 from email.header import decode_header
 from email.utils import parseaddr
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+
+
+@dataclass
+class Attachment:
+    filename: str
+    size: int
+    content_type: str
 
 
 @dataclass
@@ -13,6 +21,7 @@ class EmailMessage:
     subject: str
     body: str
     date: str
+    attachments: list = field(default_factory=list)
 
 
 def _decode_str(s):
@@ -28,28 +37,80 @@ def _decode_str(s):
     return "".join(result)
 
 
+def _strip_html(html):
+    text = re.sub(r"<br\s*/?>", "\n", html, flags=re.IGNORECASE)
+    text = re.sub(r"<p[^>]*>", "\n", text, flags=re.IGNORECASE)
+    text = re.sub(r"</p>", "\n", text, flags=re.IGNORECASE)
+    text = re.sub(r"<div[^>]*>", "\n", text, flags=re.IGNORECASE)
+    text = re.sub(r"<li[^>]*>", "\n  - ", text, flags=re.IGNORECASE)
+    text = re.sub(r"<[^>]+>", "", text)
+    text = re.sub(r"&nbsp;", " ", text)
+    text = re.sub(r"&amp;", "&", text)
+    text = re.sub(r"&lt;", "<", text)
+    text = re.sub(r"&gt;", ">", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
 def _get_body(msg):
+    plain_parts = []
+    html_parts = []
+
     if msg.is_multipart():
         for part in msg.walk():
             ctype = part.get_content_type()
             cdisp = str(part.get("Content-Disposition", ""))
-            if ctype == "text/plain" and "attachment" not in cdisp:
+            if "attachment" in cdisp:
+                continue
+            if ctype == "text/plain":
                 payload = part.get_payload(decode=True)
-                charset = part.get_content_charset() or "utf-8"
-                return payload.decode(charset, errors="ignore")
-        for part in msg.walk():
-            ctype = part.get_content_type()
-            if ctype == "text/html":
+                if payload:
+                    charset = part.get_content_charset() or "utf-8"
+                    plain_parts.append(payload.decode(charset, errors="ignore"))
+            elif ctype == "text/html":
                 payload = part.get_payload(decode=True)
-                charset = part.get_content_charset() or "utf-8"
-                return payload.decode(charset, errors="ignore")
-        return ""
+                if payload:
+                    charset = part.get_content_charset() or "utf-8"
+                    html_parts.append(payload.decode(charset, errors="ignore"))
     else:
+        ctype = msg.get_content_type()
         payload = msg.get_payload(decode=True)
-        if payload is None:
-            return ""
-        charset = msg.get_content_charset() or "utf-8"
-        return payload.decode(charset, errors="ignore")
+        if payload:
+            charset = msg.get_content_charset() or "utf-8"
+            content = payload.decode(charset, errors="ignore")
+            if ctype == "text/plain":
+                plain_parts.append(content)
+            elif ctype == "text/html":
+                html_parts.append(content)
+
+    if plain_parts:
+        return "\n".join(plain_parts)
+    if html_parts:
+        return _strip_html("\n".join(html_parts))
+    return ""
+
+
+def _get_attachments(msg):
+    attachments = []
+    if not msg.is_multipart():
+        return attachments
+    for part in msg.walk():
+        cdisp = str(part.get("Content-Disposition", ""))
+        if "attachment" not in cdisp:
+            continue
+        filename = part.get_filename()
+        if filename:
+            filename = _decode_str(filename)
+        else:
+            filename = "unnamed"
+        payload = part.get_payload(decode=True)
+        size = len(payload) if payload else 0
+        attachments.append(Attachment(
+            filename=filename,
+            size=size,
+            content_type=part.get_content_type(),
+        ))
+    return attachments
 
 
 def fetch_unseen(host, port, user, password):
@@ -72,8 +133,8 @@ def fetch_unseen(host, port, user, password):
         subject = _decode_str(msg.get("Subject"))
         body = _get_body(msg)
         date = msg.get("Date", "")
+        attachments = _get_attachments(msg)
 
-        # 标记为已读，避免重复推送
         mail.store(uid_bytes, "+FLAGS", "\\Seen")
 
         messages.append(EmailMessage(
@@ -83,6 +144,7 @@ def fetch_unseen(host, port, user, password):
             subject=subject,
             body=body,
             date=date,
+            attachments=attachments,
         ))
 
     mail.close()
