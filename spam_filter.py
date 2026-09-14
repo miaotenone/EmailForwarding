@@ -1,7 +1,10 @@
 from config import Config
 
 
-def is_spam(email_msg):
+def is_spam(email_msg, spam_threshold=None):
+    if spam_threshold is None:
+        spam_threshold = Config.SPAM_THRESHOLD
+
     if email_msg.sender in Config.BLACKLIST_SENDERS:
         return True, 1.0
 
@@ -15,4 +18,4 @@ def is_spam(email_msg):
         return False, 0.0
 
     score = min(matched * 0.15, 1.0)
-    return score >= Config.SPAM_THRESHOLD, score
+    return score >= spam_threshold, score

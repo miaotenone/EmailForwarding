@@ -5,8 +5,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 VENV_DIR="$SCRIPT_DIR/venv"
 SERVICE_NAME="email-forwarding"
 ENV_FILE="$SCRIPT_DIR/.env"
+ACCOUNTS_FILE="$SCRIPT_DIR/accounts.json"
 
-# 颜色
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -22,51 +22,75 @@ step()    { echo -e "\n${BOLD}━━━ 步骤 $1 ━━━${NC}"; }
 
 divider() {
     echo ""
-    echo -e "${BOLD}╔══════════════════════════════════════════╗${NC}"
-    echo -e "${BOLD}║     邮件转发至飞书 - 交互式安装向导      ║${NC}"
-    echo -e "${BOLD}╚══════════════════════════════════════════╝${NC}"
+    echo -e "${BOLD}╔══════════════════════════════════════════════╗${NC}"
+    echo -e "${BOLD}║   邮件转发至飞书 - 多账号交互式安装向导      ║${NC}"
+    echo -e "${BOLD}╚══════════════════════════════════════════════╝${NC}"
     echo ""
+}
+
+# ─── JSON 辅助（纯 bash，无 jq 依赖）───
+json_array_start() { ACC_JSON="["; }
+json_array_end()   { ACC_JSON="${ACC_JSON%,}]"; }
+json_add_item() {
+    local name="$1" host="$2" port="$3" email="$4" pass="$5" threshold="$6"
+    ACC_JSON="${ACC_JSON}{\"name\":\"$name\",\"imap_host\":\"$host\",\"imap_port\":$port,\"email\":\"$email\",\"password\":\"$pass\",\"spam_threshold\":$threshold},"
 }
 
 # ─── 检测系统 ───
 check_system() {
-    step "1/6 检测系统环境"
+    step "1/7 检测系统环境"
 
     if ! command -v python3 &>/dev/null; then
         error "未找到 python3，请先安装"
         exit 1
     fi
-    PYTHON_VER=$(python3 --version 2>&1)
-    success "Python: $PYTHON_VER"
+    success "Python: $(python3 --version 2>&1)"
+
+    # 获取Python主版本号用于安装对应venv包
+    PY_VER=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
+
+    # 确保 python3-venv 已安装
+    if ! python3 -m venv --help &>/dev/null 2>&1; then
+        warn "python3-venv 未安装，尝试自动安装..."
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq "python${PY_VER}-venv" python3-venv python3-pip
+    fi
+    success "python3-venv: 可用"
 
     if ! command -v pip3 &>/dev/null && ! python3 -m pip --version &>/dev/null 2>&1; then
         warn "pip3 未安装，尝试自动安装..."
-        sudo apt-get update -qq && sudo apt-get install -y -qq python3-pip python3-venv
+        sudo apt-get update -qq && sudo apt-get install -y -qq python3-pip
     fi
     success "pip: 可用"
 
+    NO_SYSTEMD=0
     if ! command -v systemctl &>/dev/null; then
-        warn "systemctl 不可用，将跳过服务注册（可手动运行）"
+        warn "systemctl 不可用，将跳过服务注册"
         NO_SYSTEMD=1
     else
         success "systemd: 可用"
-        NO_SYSTEMD=0
     fi
 }
 
 # ─── 创建虚拟环境 ───
 setup_venv() {
-    step "2/6 配置Python环境"
+    step "2/7 配置Python环境"
 
     if [ -d "$VENV_DIR" ]; then
-        warn "虚拟环境已存在: $VENV_DIR"
-        read -r -p "是否重建? [y/N] " REBUILD
-        if [[ "$REBUILD" =~ ^[Yy]$ ]]; then
+        # 检查已有venv是否可用
+        if [ -f "$VENV_DIR/bin/python3" ]; then
+            warn "虚拟环境已存在"
+            read -r -p "  是否重建? [y/N] " REBUILD
+            if [[ "$REBUILD" =~ ^[Yy]$ ]]; then
+                rm -rf "$VENV_DIR"
+                python3 -m venv "$VENV_DIR"
+                success "虚拟环境已重建"
+            fi
+        else
+            warn "已有虚拟环境损坏，自动重建..."
             rm -rf "$VENV_DIR"
             python3 -m venv "$VENV_DIR"
             success "虚拟环境已重建"
-        else
-            success "使用已有虚拟环境"
         fi
     else
         python3 -m venv "$VENV_DIR"
@@ -77,12 +101,12 @@ setup_venv() {
     success "依赖安装完成"
 }
 
-# ─── 收集邮箱配置 ───
-configure_email() {
-    step "3/6 邮箱配置"
-
+# ─── 添加邮箱账号 ───
+add_account() {
+    local index="$1"
     echo ""
-    echo -e "  ${CYAN}支持的邮箱服务器:${NC}"
+    echo -e "${BOLD}── 账号 $index ──${NC}"
+    echo -e "  ${CYAN}邮箱类型:${NC}"
     echo "    1) QQ邮箱       (imap.qq.com:993)"
     echo "    2) 163邮箱      (imap.163.com:993)"
     echo "    3) 126邮箱      (imap.126.com:993)"
@@ -91,36 +115,73 @@ configure_email() {
     echo "    6) 自定义"
     echo ""
 
-    read -r -p "  选择邮箱类型 [1-6]: " EMAIL_TYPE
-    case "$EMAIL_TYPE" in
-        1) IMAP_HOST="imap.qq.com"; IMAP_PORT="993" ;;
-        2) IMAP_HOST="imap.163.com"; IMAP_PORT="993" ;;
-        3) IMAP_HOST="imap.126.com"; IMAP_PORT="993" ;;
-        4) IMAP_HOST="imap.gmail.com"; IMAP_PORT="993" ;;
-        5) IMAP_HOST="outlook.office365.com"; IMAP_PORT="993" ;;
+    read -r -p "  选择 [1-6]: " TYPE
+    case "$TYPE" in
+        1) HOST="imap.qq.com"; PORT="993" ;;
+        2) HOST="imap.163.com"; PORT="993" ;;
+        3) HOST="imap.126.com"; PORT="993" ;;
+        4) HOST="imap.gmail.com"; PORT="993" ;;
+        5) HOST="outlook.office365.com"; PORT="993" ;;
         6)
-            read -r -p "  IMAP服务器地址: " IMAP_HOST
-            read -r -p "  IMAP端口 [993]: " IMAP_PORT
-            IMAP_PORT="${IMAP_PORT:-993}"
+            read -r -p "  IMAP服务器: " HOST
+            read -r -p "  端口 [993]: " PORT
+            PORT="${PORT:-993}"
             ;;
-        *) error "无效选择"; exit 1 ;;
+        *) error "无效选择"; return 1 ;;
     esac
 
-    read -r -p "  邮箱地址: " EMAIL_ADDR
-    read -r -s -p "  邮箱授权码(输入不可见): " EMAIL_PASS
+    read -r -p "  账号名称(如'工作邮箱') [邮箱地址]: " NAME
+    read -r -p "  邮箱地址: " EMAIL
+    read -r -s -p "  授权码(输入不可见): " PASS
+    echo ""
+    read -r -p "  垃圾邮件阈值 [0.5]: " THRESHOLD
+    THRESHOLD="${THRESHOLD:-0.5}"
+    NAME="${NAME:-$EMAIL}"
+
+    if [ -z "$EMAIL" ] || [ -z "$PASS" ]; then
+        error "邮箱地址和授权码不能为空"
+        return 1
+    fi
+
+    json_add_item "$NAME" "$HOST" "$PORT" "$EMAIL" "$PASS" "$THRESHOLD"
+    success "账号 [$NAME] 已添加"
+    return 0
+}
+
+# ─── 多账号配置 ───
+configure_accounts() {
+    step "3/7 邮箱账号配置"
+    echo ""
+    echo -e "  ${CYAN}支持同时监控多个邮箱账号，每个账号都会独立读取并推送。${NC}"
     echo ""
 
-    if [ -z "$EMAIL_ADDR" ] || [ -z "$EMAIL_PASS" ]; then
-        error "邮箱地址和授权码不能为空"
+    json_array_start
+
+    local count=0
+    while true; do
+        count=$((count + 1))
+        add_account "$count" || { count=$((count - 1)); continue; }
+
+        echo ""
+        read -r -p "  继续添加账号? [y/N] " MORE
+        if [[ ! "$MORE" =~ ^[Yy]$ ]]; then
+            break
+        fi
+    done
+
+    json_array_end
+
+    if [ "$count" -eq 0 ]; then
+        error "至少需要添加一个邮箱账号"
         exit 1
     fi
 
-    success "邮箱配置完成"
+    success "共配置 $count 个邮箱账号"
 }
 
-# ─── 收集飞书配置 ───
+# ─── 飞书配置 ───
 configure_feishu() {
-    step "4/6 飞书机器人配置"
+    step "4/7 飞书机器人配置"
 
     echo ""
     echo -e "  ${CYAN}获取方式: 飞书群 → 群设置 → 群机器人 → 添加机器人 → 自定义机器人${NC}"
@@ -141,55 +202,60 @@ configure_feishu() {
     success "飞书配置完成"
 }
 
-# ─── 收集运行参数 ───
+# ─── 运行参数 ───
 configure_runtime() {
-    step "5/6 运行参数"
+    step "5/7 运行参数"
 
     read -r -p "  轮询间隔(秒) [60]: " POLL_SEC
     POLL_SEC="${POLL_SEC:-60}"
 
-    read -r -p "  垃圾邮件阈值 [0.5]: " SPAM_THR
-    SPAM_THR="${SPAM_THR:-0.5}"
-
     success "运行参数配置完成"
 }
 
-# ─── 写入配置文件 ───
-write_env() {
-    step "6/6 写入配置并安装服务"
+# ─── 写入文件 ───
+write_files() {
+    step "6/7 写入配置文件"
 
+    # .env
     if [ -f "$ENV_FILE" ]; then
-        warn ".env 文件已存在"
-        read -r -p "  是否覆盖? [y/N] " OVERWRITE
-        if [[ ! "$OVERWRITE" =~ ^[Yy]$ ]]; then
-            success "保留已有 .env"
+        warn ".env 已存在"
+        read -r -p "  是否覆盖? [y/N] " OW
+        if [[ "$OW" =~ ^[Yy]$ ]]; then
+            cp "$ENV_FILE" "${ENV_FILE}.bak"
+            info "已备份为 .env.bak"
+        else
+            info "保留已有 .env"
+            # 更新 FEISHU 配置
+            sed -i "s|^FEISHU_WEBHOOK_URL=.*|FEISHU_WEBHOOK_URL=$FEISHU_URL|" "$ENV_FILE"
+            sed -i "s|^FEISHU_SECRET=.*|FEISHU_SECRET=$FEISHU_SEC|" "$ENV_FILE"
+            sed -i "s|^POLL_INTERVAL=.*|POLL_INTERVAL=$POLL_SEC|" "$ENV_FILE"
+            success ".env 已更新"
             return
         fi
-        cp "$ENV_FILE" "${ENV_FILE}.bak"
-        info "已备份为 .env.bak"
     fi
 
     cat > "$ENV_FILE" <<ENVEOF
-EMAIL_IMAP_HOST=$IMAP_HOST
-EMAIL_IMAP_PORT=$IMAP_PORT
-EMAIL_ADDRESS=$EMAIL_ADDR
-EMAIL_PASSWORD=$EMAIL_PASS
 FEISHU_WEBHOOK_URL=$FEISHU_URL
 FEISHU_SECRET=$FEISHU_SEC
 POLL_INTERVAL=$POLL_SEC
-SPAM_THRESHOLD=$SPAM_THR
 ENVEOF
 
     chmod 600 "$ENV_FILE"
-    success ".env 配置文件已写入 (权限 600)"
+    success ".env 已写入 (权限 600)"
+
+    # accounts.json
+    echo "$ACC_JSON" > "$ACCOUNTS_FILE"
+    chmod 600 "$ACCOUNTS_FILE"
+    success "accounts.json 已写入 (权限 600)"
 }
 
-# ─── 注册systemd服务 ───
+# ─── 注册 systemd ───
 install_service() {
     if [ "$NO_SYSTEMD" = "1" ]; then
-        warn "跳过systemd服务注册"
         return
     fi
+
+    step "7/7 注册系统服务"
 
     sudo tee /etc/systemd/system/${SERVICE_NAME}.service > /dev/null <<SVCEOF
 [Unit]
@@ -215,53 +281,54 @@ SVCEOF
 # ─── 测试连接 ───
 test_connection() {
     echo ""
-    read -r -p "  是否现在测试邮箱连接? [Y/n] " DO_TEST
+    read -r -p "  是否测试所有邮箱连接? [Y/n] " DO_TEST
     if [[ "$DO_TEST" =~ ^[Nn]$ ]]; then
         return
     fi
 
-    info "正在测试IMAP连接..."
-    TEST_OUTPUT=$("$VENV_DIR/bin/python" -c "
-import imaplib
-try:
-    m = imaplib.IMAP4_SSL('$IMAP_HOST', int('$IMAP_PORT'))
-    m.login('$EMAIL_ADDR', '$EMAIL_PASS')
-    m.select('INBOX')
-    _, data = m.search(None, 'UNSEEN')
-    count = len(data[0].split()) if data[0] else 0
-    m.close()
-    m.logout()
-    print(f'连接成功! 收件箱未读邮件: {count} 封')
-except Exception as e:
-    print(f'连接失败: {e}')
-    exit(1)
-" 2>&1) && {
-        success "$TEST_OUTPUT"
-    } || {
-        warn "$TEST_OUTPUT"
-        echo ""
-        warn "连接失败不影响安装，可稍后排查"
-    }
+    info "正在逐个测试IMAP连接..."
+    "$VENV_DIR/bin/python" -c "
+import json, imaplib
+with open('$ACCOUNTS_FILE') as f:
+    accounts = json.load(f)
+ok = 0
+for acc in accounts:
+    name = acc.get('name', acc['email'])
+    try:
+        m = imaplib.IMAP4_SSL(acc['imap_host'], int(acc.get('imap_port', 993)))
+        m.login(acc['email'], acc['password'])
+        m.select('INBOX')
+        _, data = m.search(None, 'UNSEEN')
+        count = len(data[0].split()) if data[0] else 0
+        m.close()
+        m.logout()
+        print(f'  ✓ {name} ({acc[\"email\"]})  未读: {count} 封')
+        ok += 1
+    except Exception as e:
+        print(f'  ✗ {name} ({acc[\"email\"]})  失败: {e}')
+print(f'\n测试完成: {ok}/{len(accounts)} 个账号连接成功')
+" 2>&1 || warn "测试脚本执行异常"
 }
 
 # ─── 最终提示 ───
 print_summary() {
     echo ""
-    echo -e "${BOLD}╔══════════════════════════════════════════╗${NC}"
-    echo -e "${BOLD}║              安装完成!                    ║${NC}"
-    echo -e "${BOLD}╚══════════════════════════════════════════╝${NC}"
+    echo -e "${BOLD}╔══════════════════════════════════════════════╗${NC}"
+    echo -e "${BOLD}║               安装完成!                       ║${NC}"
+    echo -e "${BOLD}╚══════════════════════════════════════════════╝${NC}"
     echo ""
-    echo -e "  配置文件:  ${CYAN}$ENV_FILE${NC}"
-    echo -e "  虚拟环境:  ${CYAN}$VENV_DIR${NC}"
+    echo -e "  配置文件:"
+    echo -e "    ${CYAN}$ENV_FILE${NC}        (飞书/轮询配置)"
+    echo -e "    ${CYAN}$ACCOUNTS_FILE${NC}   (邮箱账号列表)"
     echo ""
     echo -e "  ${BOLD}常用命令:${NC}"
-    echo "    启动服务:  sudo systemctl start $SERVICE_NAME"
-    echo "    停止服务:  sudo systemctl stop $SERVICE_NAME"
-    echo "    查看状态:  sudo systemctl status $SERVICE_NAME"
-    echo "    实时日志:  sudo journalctl -u $SERVICE_NAME -f"
-    echo "    重启服务:  sudo systemctl restart $SERVICE_NAME"
+    echo "    启动:  sudo systemctl start $SERVICE_NAME"
+    echo "    停止:  sudo systemctl stop $SERVICE_NAME"
+    echo "    状态:  sudo systemctl status $SERVICE_NAME"
+    echo "    日志:  sudo journalctl -u $SERVICE_NAME -f"
+    echo "    重启:  sudo systemctl restart $SERVICE_NAME"
     echo ""
-    echo -e "  ${BOLD}手动运行(不安装服务):${NC}"
+    echo -e "  ${BOLD}手动运行:${NC}"
     echo "    $VENV_DIR/bin/python $SCRIPT_DIR/main.py"
     echo ""
 
@@ -282,10 +349,10 @@ main() {
     divider
     check_system
     setup_venv
-    configure_email
+    configure_accounts
     configure_feishu
     configure_runtime
-    write_env
+    write_files
     install_service
     test_connection
     print_summary

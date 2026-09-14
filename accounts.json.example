@@ -1,0 +1,26 @@
+[
+  {
+    "name": "QQ工作邮箱",
+    "imap_host": "imap.qq.com",
+    "imap_port": 993,
+    "email": "your_email@qq.com",
+    "password": "your_app_password",
+    "spam_threshold": 0.5
+  },
+  {
+    "name": "163私人邮箱",
+    "imap_host": "imap.163.com",
+    "imap_port": 993,
+    "email": "your_email@163.com",
+    "password": "your_app_password",
+    "spam_threshold": 0.5
+  },
+  {
+    "name": "Gmail",
+    "imap_host": "imap.gmail.com",
+    "imap_port": 993,
+    "email": "your_email@gmail.com",
+    "password": "your_app_password",
+    "spam_threshold": 0.6
+  }
+]
