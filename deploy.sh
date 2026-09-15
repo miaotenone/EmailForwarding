@@ -118,7 +118,16 @@ setup_venv() {
             warn "虚拟环境已存在"
             read -r -p "  是否重建? [y/N] " REBUILD
             if [[ ! "$REBUILD" =~ ^[Yy]$ ]]; then
-                "$VENV_DIR/bin/pip" install -q -r "$SCRIPT_DIR/requirements.txt"
+                if [ -f "$VENV_DIR/bin/pip" ]; then
+                    "$VENV_DIR/bin/pip" install -q -r "$SCRIPT_DIR/requirements.txt"
+                else
+                    warn "pip 不可用，尝试修复虚拟环境..."
+                    "$VENV_DIR/bin/python3" -m ensurepip --upgrade 2>/dev/null || {
+                        warn "ensurepip 失败，使用 get-pip.py 安装..."
+                        curl -sS https://bootstrap.pypa.io/get-pip.py | "$VENV_DIR/bin/python3"
+                    }
+                    "$VENV_DIR/bin/pip" install -q -r "$SCRIPT_DIR/requirements.txt"
+                fi
                 success "依赖安装完成"
                 return
             fi
@@ -126,8 +135,18 @@ setup_venv() {
         rm -rf "$VENV_DIR"
     fi
 
-    python3 -m venv "$VENV_DIR"
+    python3 -m venv "$VENV_DIR" || {
+        warn "虚拟环境创建时 ensurepip 失败，尝试继续..."
+    }
     success "虚拟环境已创建"
+
+    if [ ! -f "$VENV_DIR/bin/pip" ]; then
+        warn "pip 未随虚拟环境安装，尝试修复..."
+        "$VENV_DIR/bin/python3" -m ensurepip --upgrade 2>/dev/null || {
+            warn "ensurepip 失败，使用 get-pip.py 安装..."
+            curl -sS https://bootstrap.pypa.io/get-pip.py | "$VENV_DIR/bin/python3"
+        }
+    fi
 
     "$VENV_DIR/bin/pip" install -q -r "$SCRIPT_DIR/requirements.txt"
     success "依赖安装完成"
