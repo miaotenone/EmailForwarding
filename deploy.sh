@@ -395,9 +395,111 @@ print_summary() {
     fi
 }
 
-# ─── 主流程 ───
-main() {
+# ─── 用法提示 ───
+usage() {
+    echo "用法: $0 [env|account|feishu|runtime|write|service|test|all|help]"
+    echo ""
+    echo "  env       - 环境配置（系统依赖 + Python虚拟环境）"
+    echo "  account   - 邮箱账号配置"
+    echo "  feishu    - 飞书机器人配置"
+    echo "  runtime   - 运行参数配置（轮询间隔）"
+    echo "  write     - 写入配置文件（需要先运行 account 和 feishu）"
+    echo "  service   - 注册系统服务"
+    echo "  test      - 测试邮箱连接"
+    echo "  all       - 全部流程（默认）"
+    echo "  help      - 显示此帮助信息"
+    echo ""
+    echo "示例:"
+    echo "  $0              # 显示交互式菜单"
+    echo "  $0 env          # 只配置环境"
+    echo "  $0 account      # 只配置账号"
+    echo "  $0 all          # 完整安装"
+    exit 0
+}
+
+# ─── 交互式菜单 ───
+interactive_menu() {
     divider
+    echo -e "  ${CYAN}请选择要执行的步骤:${NC}"
+    echo ""
+    echo "    1) 环境配置     - 系统依赖 + Python虚拟环境"
+    echo "    2) 账号配置     - 邮箱账号设置"
+    echo "    3) 飞书配置     - Webhook配置"
+    echo "    4) 运行参数     - 轮询间隔等"
+    echo "    5) 写入配置     - 保存配置文件"
+    echo "    6) 注册服务     - systemd服务"
+    echo "    7) 测试连接     - 测试邮箱IMAP"
+    echo "    8) 全部执行     - 完整安装流程"
+    echo "    0) 退出"
+    echo ""
+
+    read -r -p "  选择 [0-8]: " CHOICE
+    echo ""
+
+    case "$CHOICE" in
+        1) env_action ;;
+        2) account_action ;;
+        3) feishu_action ;;
+        4) runtime_action ;;
+        5) write_action ;;
+        6) service_action ;;
+        7) test_action ;;
+        8) all_action ;;
+        0) exit 0 ;;
+        *) error "无效选择"; exit 1 ;;
+    esac
+}
+
+# ─── 各步骤独立执行函数 ───
+env_action() {
+    check_system
+    install_system_deps
+    setup_venv
+}
+
+account_action() {
+    configure_accounts
+    echo "$ACC_JSON" > "$ACCOUNTS_FILE"
+    chmod 600 "$ACCOUNTS_FILE"
+    success "accounts.json 已写入 (权限 600)"
+}
+
+feishu_action() {
+    configure_feishu
+    runtime_action  # 轮询间隔
+    write_env_file
+}
+
+runtime_action() {
+    configure_runtime
+}
+
+write_action() {
+    if [ -z "$FEISHU_URL" ] || [ -z "$POLL_SEC" ]; then
+        warn "飞书配置或运行参数未设置，先运行配置步骤..."
+        configure_feishu
+        configure_runtime
+    fi
+    write_files
+}
+
+service_action() {
+    if [ ! -d "$VENV_DIR" ]; then
+        error "虚拟环境不存在，请先运行: $0 env"
+        exit 1
+    fi
+    install_service
+}
+
+test_action() {
+    if [ ! -f "$ACCOUNTS_FILE" ]; then
+        error "accounts.json 不存在，请先运行: $0 account"
+        exit 1
+    fi
+    test_connection
+}
+
+all_action() {
     check_system
     install_system_deps
     setup_venv
@@ -408,6 +510,40 @@ main() {
     install_service
     test_connection
     print_summary
+}
+
+# ─── 写入环境变量文件 ───
+write_env_file() {
+    cat > "$ENV_FILE" <<ENVEOF
+FEISHU_WEBHOOK_URL=$FEISHU_URL
+FEISHU_SECRET=$FEISHU_SEC
+POLL_INTERVAL=$POLL_SEC
+ENVEOF
+    chmod 600 "$ENV_FILE"
+    success ".env 已写入 (权限 600)"
+}
+
+# ─── 主流程 ───
+main() {
+    if [ $# -eq 0 ]; then
+        interactive_menu
+    else
+        case "$1" in
+            env)      env_action ;;
+            account)  account_action ;;
+            feishu)   feishu_action ;;
+            runtime)  runtime_action ;;
+            write)    write_action ;;
+            service)  service_action ;;
+            test)     test_action ;;
+            all)      all_action ;;
+            -h|--help|help) usage ;;
+            *)
+                error "未知参数: $1"
+                usage
+                ;;
+        esac
+    fi
 }
 
 main "$@"
